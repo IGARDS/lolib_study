@@ -11,17 +11,18 @@ import base
 import pyrankability
 
 if len(sys.argv) < 3:
-    print("Usage: python analyze.py <group> <file>")
+    print("Usage: python create_ranking_problem_card.py <D matrix file LOLib Format> <outfile>")
     exit(0)
     
-group = sys.argv[1]
-file = sys.argv[2]
+#group = sys.argv[1]
+file_path = sys.argv[1]
+result_path = sys.argv[2]
 
-data_dir = f'{home}/lolib_study/data/'
-results_dir = f'{home}/lolib_study/RPLib/'
+#data_dir = f'{home}/lolib_study/data/'
+#results_dir = f'{home}/lolib_study/RPLib/'
 
-file_path = f'{data_dir}/{group}/{file}'
-result_path = f'{results_dir}/{group}/{file}.json'
+#file_path = f'{data_dir}/{group}/{file}'
+#result_path = f'{results_dir}/{group}/{file}.json'
 
 D = base.read_instance(file_path)
 
@@ -31,12 +32,18 @@ sums2 = D.sum(axis=1)
 mask = sums1 + sums2 != 2*np.diag(D)
 D = D.loc[mask,mask]
 
-# Solve using LP which should be fast
+# We will construct an instance to store our findings
+instance = base.LOLibInstance()
+instance.D = D
+
+# Solve using LP which is faster
 delta_lp,details_lp = pyrankability.rank.solve(D,method='lop',cont=True)
 
-# Next round and then convert to a dictionary style that is passed to later functions
+# Next threshold numbers close to 1.0 or 0.0 and then convert to a dictionary style that is passed to later functions
 orig_sol_x = pyrankability.common.threshold_x(details_lp['x'])
-# Fix any that can be rounded. This leaves Gurubi a much smaller set of parameters
+centroid_x = orig_sol_x
+instance.centroid_x = centroid_x
+# Fix any that can be rounded. This leaves Gurubi a much smaller set of parameters to optimize
 fix_x = {}
 rows,cols = np.where(orig_sol_x==0)
 for i in range(len(rows)):
@@ -45,27 +52,32 @@ rows,cols = np.where(orig_sol_x==1)
 for i in range(len(rows)):
     fix_x[rows[i],cols[i]] = 1
     
-#solutions = pd.DataFrame(columns=["cont","fix_x","delta","details"])
-
+# Now solve BILP
 cont = False
 delta,details = pyrankability.rank.solve(D,method='lop',fix_x=fix_x,cont=cont)
 solution = pd.Series([cont,fix_x,delta,details],index=["cont","fix_x","delta","details"],name=0)
+orig_sol_x = details['x']
+orig_obj = details['obj']
 
+# Add what we have found to our instance
+instance.obj = orig_obj
+instance.add_solution(solution['details']['P'][0])
+
+# Now we will see if there are multiple optimal solutions
 try:
     cont = False
-    orig_sol_x = details['x']
-    orig_obj = details['obj']
     other_delta,other_detail = pyrankability.search.solve_any_diff(D,orig_obj,orig_sol_x,method='lop')
     other_solution = pd.Series([cont,orig_obj,orig_sol_x,delta,details],index=["cont","orig_obj","orig_sol_x","delta","details"],name=1)
+    instance.add_solution(other_solution['details']['P'][0])
     print('Found multiple solutions for %s'%file_path)
 except:
     print('Cannot find multiple solutions for %s (or another problem occured)'%file_path)
 
-instance = base.LOLibInstance()
-instance.D = D
-instance.obj = orig_obj
-instance.add_solution(solution['details']['P'][0])
-instance.add_solution(other_solution['details']['P'][0])
+if len(instance.solutions) > 1: # Multiple optimal
+    outlier_deltas,outlier_details = pyrankability.search.solve_min_tau(D,centroid_x,orig_sol_x,method='lop')
+    instance.add_solution(outlier_details['P'][0])
+    instance.outlier_solution = outlier_details['P'][0]
+        
 #solutions = pd.concat([solution,other_solution],axis=1).T
 #record = pd.Series({"group":group,"file":file,"D":D,"mask":mask,"method":"lop","solutions":solutions})
 
